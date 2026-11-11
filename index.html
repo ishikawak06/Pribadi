@@ -45,8 +45,8 @@ input,select,textarea{width:100%;padding:11px;border:1px solid var(--ln);border-
 const $=s=>document.querySelector(s),p=n=>String(n).padStart(2,'0'),esc=s=>String(s??'').replace(/[&<>"']/g,c=>'&#'+c.charCodeAt(0)+';'),uid=()=>crypto.randomUUID(),
 ls=(k,v)=>{try{if(v===undefined)return localStorage.getItem(k);localStorage.setItem(k,v)}catch(e){}},
 SB='https://oifinnbsptccqmadhsls.supabase.co/rest/v1/',H={apikey:'sb_publishable_w3WYP20WV2Oqy15qW_rQHw_-Hc9y3sz','Content-Type':'application/json'},
-COLS={categories:['id','name','emoji','kind','updated','deleted'],sessions:['id','cat_id','started_at','ended_at','note','updated','deleted'],routines:['id','name','cat_id','time','est','days','updated','deleted']},
-T=Object.keys(COLS),S={categories:[],sessions:[],routines:[]},DN=['Min','Sen','Sel','Rab','Kam','Jum','Sab'],
+COLS={categories:['id','name','emoji','kind','updated','deleted'],sessions:['id','cat_id','started_at','ended_at','note','updated','deleted'],routines:['id','name','cat_id','time','est','days','since','archived','updated','deleted'],routine_logs:['id','routine_id','day','done','done_at','updated','deleted'],quotes:['id','text','src','fav','updated','deleted']},
+T=Object.keys(COLS),S=Object.fromEntries(T.map(s=>[s,[]])),DN=['Min','Sen','Sel','Rab','Kam','Jum','Sab'],
 DEF=[['Kerja','💼','produktif'],['Belajar','📚','produktif'],['Main Game','🎮','hiburan'],['Istirahat','☕','netral'],['Bisnis','🏪','produktif'],['Olahraga','🏃','produktif'],['Ibadah','🕌','produktif'],['Membaca','📖','produktif'],['Sosial Media','📱','hiburan']],
 hms=s=>{s=Math.floor(s);return p(s/3600|0)+':'+p(s%3600/60|0)+':'+p(s%60)},
 hm=t=>{const d=new Date(t);return p(d.getHours())+':'+p(d.getMinutes())},
@@ -56,25 +56,38 @@ dur=s=>{s=Math.floor(s);return s>=3600?(s/3600|0)+'j '+p(s%3600/60|0)+'m':s>=60?
 cat=id=>S.categories.find(c=>c.id==id)||{name:'?',emoji:'•',kind:'netral'},cats=()=>S.categories.filter(c=>!c.deleted),
 col=id=>{let h=0;for(const c of id)h=(h*31+c.charCodeAt(0))%360;return`hsl(${h} 38% 58%)`},
 act=()=>S.sessions.find(s=>!s.ended_at&&!s.deleted),
-un=s=>S[s].filter(x=>x.sync!='ok'&&(s!='sessions'||x.ended_at));
-let db,tab='timer',U=null,busy=0,syn=0,tt,hd=ymd(new Date()),rutAll=0,sm='d',so=0;
+un=s=>S[s].filter(x=>x.sync!='ok');
+let db,tab='timer',U=null,busy=0,syn=0,tt,hd=ymd(new Date()),rm='t',Q=null,sm='d',so=0;
 
 /* ---------- IndexedDB ---------- */
-const open=()=>new Promise((r,j)=>{const q=indexedDB.open('timelog',1);q.onupgradeneeded=()=>T.forEach(s=>q.result.createObjectStore(s,{keyPath:'id'}));q.onsuccess=()=>{db=q.result;r()};q.onerror=j}),
+const open=()=>new Promise((r,j)=>{const q=indexedDB.open('timelog',2);q.onupgradeneeded=()=>T.forEach(s=>{if(!q.result.objectStoreNames.contains(s))q.result.createObjectStore(s,{keyPath:'id'})});q.onsuccess=()=>{db=q.result;r()};q.onerror=j}),
 tx=(s,m,f)=>new Promise((r,j)=>{const t=db.transaction(s,m),q=f(t.objectStore(s));t.oncomplete=()=>r(q&&q.result);t.onerror=j}),
 put=(s,v)=>tx(s,'readwrite',o=>o.put(v));
 async function save(s,o){o.updated=Date.now();o.sync='pending';const i=S[s].findIndex(x=>x.id==o.id);i<0?S[s].push(o):S[s][i]=o;await put(s,o);sync()}
 
-/* ---------- Sinkronisasi Supabase ---------- */
-function bd(){const a=T.flatMap(un),n=a.length;$('#bd').textContent=!navigator.onLine?'Offline'+(n?' · '+n+' belum sinkron':''):a.some(x=>x.sync=='run')?'Menyinkron…':a.some(x=>x.sync=='fail')?'Gagal · ketuk untuk ulang':n?n+' belum sinkron':'✓ Tersinkron'}
-async function pull(){try{for(const s of T){const r=await fetch(SB+s+'?select='+COLS[s].join(',')+'&limit=10000',{headers:H,signal:AbortSignal.timeout(15000)});if(!r.ok)continue;for(const w of await r.json()){const l=S[s].find(x=>x.id==w.id);if(!l||w.updated>l.updated){w.sync='ok';const i=S[s].indexOf(l);i<0?S[s].push(w):S[s][i]=w;await put(s,w)}}}}catch(e){}}
-async function sync(){if(syn||!navigator.onLine)return bd();syn=1;let bad=0;
-try{for(const s of T){const q=un(s);if(!q.length)continue;q.forEach(x=>x.sync='run');bd();
-const r=await fetch(SB+s+'?on_conflict=id',{method:'POST',headers:{...H,Prefer:'resolution=merge-duplicates,return=minimal'},signal:AbortSignal.timeout(20000),body:JSON.stringify(q.map(x=>Object.fromEntries(COLS[s].map(k=>[k,x[k]??null]))))});
-for(const x of q)if(x.sync=='run'){if(r.ok){x.sync='ok';await put(s,x)}else{x.sync='fail';bad=1}}}}
+/* ---------- Sinkronisasi Supabase (login + merge aman) ---------- */
+const AU='https://oifinnbsptccqmadhsls.supabase.co/auth/v1/',ok_=w=>/^[\w-]{1,80}$/.test(w.id),auth=()=>{try{return JSON.parse(ls('auth'))}catch(e){return null}},
+AH={apikey:H.apikey,'Content-Type':'application/json'};
+async function hdr(){let a=auth();if(!a)return null;
+if(a.exp<Date.now()/1e3+60){const r=await fetch(AU+'token?grant_type=refresh_token',{method:'POST',headers:AH,body:JSON.stringify({refresh_token:a.ref})});
+if(r.ok){const j=await r.json();a={tok:j.access_token,ref:j.refresh_token,exp:j.expires_at,em:a.em};ls('auth',JSON.stringify(a))}else if(r.status<500){ls('auth','');return null}else throw 0}
+return{...H,Authorization:'Bearer '+a.tok}}
+function login(){form('Masuk untuk sinkron',[{k:'em',l:'Email',t:'email',v:'',req:1},{k:'pw',l:'Kata sandi',t:'password',v:'',req:1}],async f=>{try{const r=await fetch(AU+'token?grant_type=password',{method:'POST',headers:AH,body:JSON.stringify({email:f.em,password:f.pw})}),j=await r.json();if(!r.ok)return toast('Gagal masuk: '+(j.msg||j.error_description||r.status));ls('auth',JSON.stringify({tok:j.access_token,ref:j.refresh_token,exp:j.expires_at,em:f.em}));toast('Berhasil masuk');await syncNow()}catch(e){toast('Tidak ada koneksi')}})}
+function logout(){if(confirm('Keluar? Data lokal tetap aman di perangkat ini.')){ls('auth','');render()}}
+function bd(){const a=T.flatMap(un),n=a.length;$('#bd').textContent=!auth()?'Masuk untuk sinkron':!navigator.onLine?'Offline'+(n?' · '+n+' belum sinkron':''):a.some(x=>x.sync=='run')?'Menyinkron…':a.some(x=>x.sync=='fail')?'Gagal · ketuk ulang':n?n+' belum sinkron':'✓ Tersinkron'}
+function fixAct(){const A=S.sessions.filter(s=>!s.ended_at&&!s.deleted).sort((a,b)=>a.started_at-b.started_at);A.slice(0,-1).forEach((s,i)=>{s.ended_at=A[i+1].started_at;save('sessions',s)})}
+async function pull(h){try{for(const s of T){const k='pull_'+s;let mx=+ls(k)||0,lo=Math.max(0,mx-6e5);
+for(;;){const r=await fetch(SB+s+'?select='+COLS[s].join(',')+'&updated=gt.'+lo+'&order=updated.asc&limit=1000',{headers:h,signal:AbortSignal.timeout(15000)});if(!r.ok)return 0;const R=await r.json();
+for(const w of R){mx=Math.max(mx,w.updated);if(!ok_(w))continue;const l=S[s].find(x=>x.id==w.id);if(!l||w.updated>l.updated){w.sync='ok';const i=S[s].indexOf(l);i<0?S[s].push(w):S[s][i]=w;await put(s,w)}}
+if(R.length<1000)break;lo=R[R.length-1].updated}ls(k,mx)}fixAct();return 1}catch(e){return 0}}
+async function sync(){if(syn||!navigator.onLine||!auth())return bd();syn=1;let bad=0;
+try{const h=await hdr();if(!h||!(await pull(h)))throw 0;
+for(const s of T){const q=un(s);if(!q.length)continue;q.forEach(x=>x.sync='run');bd();
+const r=await fetch(SB+s+'?on_conflict=id',{method:'POST',headers:{...h,Prefer:'resolution=merge-duplicates,return=minimal'},signal:AbortSignal.timeout(20000),body:JSON.stringify(q.map(x=>Object.fromEntries(COLS[s].map(k=>[k,x[k]??null]))))});
+for(const x of q){const c=S[s].find(y=>y.id==x.id);if(c&&c.sync=='run'){if(r.ok){c.sync='ok';await put(s,c)}else{c.sync='fail';bad=1}}}}}
 catch(e){bad=1;T.forEach(s=>S[s].forEach(x=>{if(x.sync=='run')x.sync='fail'}))}
 syn=0;bd();if(!bad&&T.some(s=>un(s).some(x=>x.sync=='pending')))setTimeout(sync,300)}
-async function syncNow(){await pull();await sync();render()}
+async function syncNow(){if(!auth())return login();await sync();render()}
 
 /* ---------- Timer ---------- */
 function toast(m,u){const t=$('#ts');t.innerHTML=esc(m)+(u?'<button onclick="undo()">Urungkan</button>':'');t.style.display='block';clearTimeout(tt);tt=setTimeout(()=>t.style.display='none',u?7000:2500)}
@@ -96,13 +109,14 @@ d.returnValue='';d.onclose=()=>{const v=d.returnValue,fd=new FormData(d.querySel
 function editC(id){const c=S.categories.find(x=>x.id==id)||{id:uid(),name:'',emoji:'⭐',kind:'netral'};
 form(id?'Edit kategori':'Kategori baru',[{k:'name',l:'Nama',v:c.name,req:1},{k:'emoji',l:'Ikon (emoji)',v:c.emoji},{k:'kind',l:'Jenis (untuk perbandingan produktif vs hiburan)',t:'select',v:c.kind,o:[['produktif','Produktif'],['hiburan','Hiburan'],['netral','Netral']]}],
 f=>save('categories',{...c,name:f.name,emoji:f.emoji||'•',kind:f.kind,deleted:false}).then(render),id&&(()=>confirm('Hapus kategori "'+c.name+'"? Riwayat lama tetap tersimpan.')&&save('categories',{...c,deleted:true}).then(render)))}
-function editR(id){const r=S.routines.find(x=>x.id==id)||{id:uid(),name:'',cat_id:cats()[0]?.id,time:'',est:'',days:[]};
-form(id?'Edit rutinitas':'Rutinitas baru',[{k:'name',l:'Nama',v:r.name,req:1},{k:'cat_id',l:'Kategori',t:'select',v:r.cat_id,o:cats().map(c=>[c.id,c.emoji+' '+c.name])},{k:'time',l:'Jam',t:'time',v:r.time},{k:'est',l:'Estimasi durasi (menit)',t:'number',v:r.est},{k:'days',l:'Hari (kosong = setiap hari)',t:'days',v:r.days}],
-f=>save('routines',{...r,name:f.name,cat_id:f.cat_id,time:f.time||null,est:+f.est||null,days:f.days.map(Number),deleted:false}).then(render),id&&(()=>confirm('Hapus rutinitas ini?')&&save('routines',{...r,deleted:true}).then(render)))}
+function editR(id){const r=S.routines.find(x=>x.id==id)||{id:uid(),name:'',cat_id:cats()[0]?.id,time:'',est:'',days:[],archived:false};
+form(id?'Edit kegiatan':'Kegiatan baru',[{k:'name',l:'Nama',v:r.name,req:1},{k:'cat_id',l:'Kategori (untuk tombol ▶ timer)',t:'select',v:r.cat_id,o:cats().map(c=>[c.id,c.emoji+' '+c.name])},{k:'time',l:'Jam',t:'time',v:r.time},{k:'est',l:'Estimasi durasi (menit)',t:'number',v:r.est},{k:'days',l:'Hari (kosong = setiap hari)',t:'days',v:r.days},{k:'arc',l:'Status',t:'select',v:r.archived?'1':'0',o:[['0','Aktif'],['1','Arsip (riwayat tetap tersimpan)']]}],
+f=>save('routines',{...r,name:f.name,cat_id:f.cat_id,time:f.time||null,est:+f.est||null,days:f.days.map(Number),archived:f.arc=='1',since:r.since||ymd(new Date()),deleted:false}).then(render),
+id&&(()=>confirm('Hapus kegiatan? Riwayat ceklis tetap tersimpan.')&&save('routines',{...r,deleted:true}).then(render)))}
 async function startR(id){const r=S.routines.find(x=>x.id==id);await start(r.cat_id);tab='timer';render()}
 function editS(id){const s=S.sessions.find(x=>x.id==id);
 form('Edit sesi',[{k:'cat_id',l:'Kategori',t:'select',v:s.cat_id,o:S.categories.filter(c=>!c.deleted||c.id==s.cat_id).map(c=>[c.id,c.emoji+' '+c.name])},{k:'st',l:'Mulai',t:'datetime-local',v:lt(s.started_at),req:1},...(s.ended_at?[{k:'en',l:'Selesai',t:'datetime-local',v:lt(s.ended_at),req:1}]:[]),{k:'note',l:'Catatan',t:'area',v:s.note}],
-f=>{const st=+new Date(f.st),en=f.en?+new Date(f.en):null;if(en&&en<=st)return toast('Jam selesai harus setelah jam mulai');save('sessions',{...s,cat_id:f.cat_id,started_at:st,ended_at:en,note:f.note}).then(render)},
+f=>{const st=+new Date(f.st),en=f.en?+new Date(f.en):null;const n=Date.now();if(en&&en<=st)return toast('Jam selesai harus setelah jam mulai');if(st>n||en>n+6e4)return toast('Waktu tidak boleh di masa depan');if(S.sessions.some(o=>o.id!=s.id&&!o.deleted&&st<(o.ended_at||n)&&(en||n)>o.started_at))return toast('Tumpang tindih dengan sesi lain');save('sessions',{...s,cat_id:f.cat_id,started_at:st,ended_at:en,note:f.note}).then(render)},
 ()=>confirm('Hapus sesi ini?')&&save('sessions',{...s,deleted:true,ended_at:s.ended_at||Date.now()}).then(render))}
 
 /* ---------- Statistik ---------- */
@@ -113,11 +127,15 @@ const dayTxt=r=>!r.days?.length||r.days.length==7?'Setiap hari':r.days.map(d=>DN
 
 /* ---------- Tampilan ---------- */
 const V={
-timer(){const a=act();return`<div class="clk" id="ck">00:00:00</div><div class="cur" id="cu"></div><div id="rm"></div><div class="g">${cats().map(c=>`<button class="cb${a&&a.cat_id==c.id?' on':''}" onclick="start('${c.id}')"><i>${esc(c.emoji)}</i>${esc(c.name)}</button>`).join('')}</div><button class="off" ${a?'':'disabled'} onclick="stop()">OFF</button>`},
-rut(){const t=new Date().getDay(),L=S.routines.filter(r=>!r.deleted&&(rutAll||!r.days?.length||r.days.includes(t))).sort((a,b)=>(a.time||'99').localeCompare(b.time||'99')),
-G=[['🌅 Pagi',r=>r.time&&r.time<'11:00'],['☀️ Siang',r=>r.time>='11:00'&&r.time<'18:00'],['🌙 Malam',r=>r.time>='18:00'],['Tanpa jam',r=>!r.time]];
-const body=G.map(([n,f])=>{const x=L.filter(f);return x.length?`<div class="mut" style="margin:16px 0 8px">${n}</div>`+x.map(r=>`<div class="cd"><div class="r"><div onclick="editR('${r.id}')" style="flex:1"><b>${esc(r.name)}</b><div class="mut">${r.time||''} ${esc(cat(r.cat_id).emoji)}${r.est?' · '+r.est+' mnt':''}${rutAll?' · '+dayTxt(r):''}</div></div><button class="bt p" onclick="startR('${r.id}')">MULAI</button></div></div>`).join(''):''}).join('');
-return`<div class="r"><h2>Rutinitas</h2><button class="bt p" onclick="editR()">+ Baru</button></div><div class="seg"><button class="bt${rutAll?'':' on'}" onclick="rutAll=0;render()">Hari ini</button><button class="bt${rutAll?' on':''}" onclick="rutAll=1;render()">Semua</button></div>`+(body||'<p class="mut">Belum ada rutinitas. Tekan "+ Baru" untuk membuat.</p>')},
+timer(){const a=act();return qcard()+`<div class="clk" id="ck">00:00:00</div><div class="cur" id="cu"></div><div id="rm"></div><div class="g">${cats().map(c=>`<button class="cb${a&&a.cat_id==c.id?' on':''}" onclick="start('${c.id}')"><i>${esc(c.emoji)}</i>${esc(c.name)}</button>`).join('')}</div><button class="off" ${a?'':'disabled'} onclick="stop()">OFF</button>`},
+rut(){const td=ymd(new Date()),LG=lg(),
+tb=`<div class="r"><h2>Rutinitas</h2><button class="bt p" onclick="editR()">+ Baru</button></div><div class="seg">${[['t','Hari ini'],['a','Semua'],['x','Arsip'],['h','Riwayat']].map(([k,n])=>`<button class="bt${rm==k?' on':''}" onclick="rm='${k}';so=0;render()">${n}</button>`).join('')}</div>`;
+if(rm=='h')return tb+rhist(LG);
+const L=S.routines.filter(r=>!r.deleted&&(rm=='x'?r.archived:!r.archived&&(rm=='a'||ap(r,td)))).sort((a,b)=>(a.time||'99').localeCompare(b.time||'99')),
+G=[['🌅 Pagi',r=>r.time&&r.time<'11:00'],['☀️ Siang',r=>r.time>='11:00'&&r.time<'18:00'],['🌙 Malam',r=>r.time>='18:00'],['Tanpa jam',r=>!r.time]],
+dn=L.filter(r=>LG.has(r.id+'|'+td)).length;
+return tb+(rm=='t'?`<div class="cd"><div class="r"><b>${dn}/${L.length} (${L.length?Math.round(dn/L.length*100):0}%)</b><span class="mut">🔥 ${streak(LG)} hari beruntun</span></div><div class="bar"><i style="width:${L.length?dn/L.length*100:0}%"></i></div></div>`:'')+
+(G.map(([n,f])=>{const x=L.filter(f);return x.length?`<div class="mut" style="margin:16px 0 8px">${n}</div>`+x.map(r=>{const d=LG.has(r.id+'|'+td);return`<div class="cd r">${rm=='t'?`<button class="bt${d?' p':''}" style="width:44px;height:44px;border-radius:50%;padding:0" onclick="tgl('${r.id}')">${d?'✓':''}</button>`:''}<div style="flex:1" onclick="editR('${r.id}')"><b${d?' style="text-decoration:line-through;opacity:.5"':''}>${esc(r.name)}</b><div class="mut">${esc(r.time||'')} ${esc(cat(r.cat_id).emoji)}${r.est?' · '+esc(r.est)+' mnt':''}${rm=='t'?'':' · '+dayTxt(r)}</div></div>${rm=='t'?`<button class="bt" onclick="startR('${r.id}')">▶</button>`:''}</div>`}).join(''):''}).join('')||'<p class="mut">Belum ada kegiatan.</p>')},
 hist(){const a=+new Date(hd+'T00:00:00'),b=a+864e5,L=S.sessions.filter(s=>!s.deleted&&s.started_at>=a&&s.started_at<b).sort((x,y)=>y.started_at-x.started_at),M={ok:'✓',pending:'○',run:'…',fail:'!'};
 return`<h2>Riwayat</h2><input type="date" value="${hd}" onchange="hd=this.value||hd;render()" style="margin-bottom:12px">`+(L.map(s=>{const c=cat(s.cat_id);return`<div class="cd" onclick="editS('${s.id}')"><div class="r"><b>${esc(c.emoji)} ${esc(c.name)}</b><b>${s.ended_at?hms((s.ended_at-s.started_at)/1000):'berjalan'}</b></div><div class="mut">${hm(s.started_at)} – ${s.ended_at?hm(s.ended_at):'…'} · sinkron ${M[s.sync]||'○'}${s.note?'<br>'+esc(s.note):''}</div></div>`}).join('')||'<p class="mut">Tidak ada catatan pada tanggal ini.</p>')},
 stat(){const[a,b]=range(sm,so),[pa,pb]=range(sm,so-1),cur=agg(a,b),prv=agg(pa,pb),E=Object.entries(cur.t).sort((x,y)=>y[1]-x[1]),
@@ -126,28 +144,53 @@ K={produktif:0,hiburan:0,netral:0};E.forEach(([id,v])=>K[cat(id).kind||'netral']
 const sg=(m,n)=>`<button class="bt${sm==m?' on':''}" onclick="sm='${m}';so=0;render()">${n}</button>`;let chart='';
 if(sm=='d'){const now=Date.now(),seg=S.sessions.filter(s=>!s.deleted).map(s=>[Math.max(s.started_at,a),Math.min(s.ended_at||now,b),s.cat_id]).filter(z=>z[1]>z[0]).map(([x,y,c])=>`<i style="left:${(x-a)/(b-a)*100}%;width:${(y-x)/(b-a)*100}%;background:${col(c)}"></i>`).join('');
 chart=`<h3 style="margin:20px 0 8px">Timeline 24 jam</h3><div class="tl">${seg}</div><div class="r mut"><span>00</span><span>06</span><span>12</span><span>18</span><span>24</span></div><p class="mut">Belum tercatat: ${dur(Math.max(0,(Math.min(b,now)-a)/1000-cur.tot))}</p>`}
-else{const D=[];for(let x=a;x<b;x=+new Date(new Date(x).getFullYear(),new Date(x).getMonth(),new Date(x).getDate()+1))D.push(agg(x,Math.min(b,x+864e5+36e5)).tot);const mx=Math.max(...D,1);
+else{const D=[];for(let x=a,n;x<b;x=n){const d=new Date(x);n=+new Date(d.getFullYear(),d.getMonth(),d.getDate()+1);D.push(agg(x,Math.min(n,b)).tot)};const mx=Math.max(...D,1);
 chart=`<h3 style="margin:20px 0 8px">Total per hari</h3><div class="vb">${D.map(v=>`<i style="height:${v/mx*100}%"></i>`).join('')}</div>`}
 const d=cur.tot-prv.tot;
 return`<h2>Statistik</h2><div class="seg">${sg('d','Hari')}${sg('w','Minggu')}${sg('m','Bulan')}</div><div class="r"><button class="bt" onclick="so--;render()">‹</button><span class="mut">${lab}</span><button class="bt" ${so>=0?'disabled':''} onclick="so++;render()">›</button></div>
 <div class="clk" style="font-size:44px;margin:16px 0 0">${dur(cur.tot)}</div><div class="cur" style="margin-bottom:12px">total tercatat · ${dur(Math.abs(d))} ${d>=0?'lebih banyak':'lebih sedikit'} dari periode lalu</div>`+
 (E.length?`<div class="cd mut">Terbanyak: <b style="color:var(--fg)">${esc(cat(E[0][0]).emoji)} ${esc(cat(E[0][0]).name)}</b><br>Produktif ${dur(K.produktif)} (${Math.round(K.produktif/cur.tot*100)}%) · Hiburan ${dur(K.hiburan)} (${Math.round(K.hiburan/cur.tot*100)}%) · Netral ${dur(K.netral)}</div>`+E.map(([id,v])=>{const c=cat(id),x=v-(prv.t[id]||0);return`<div style="margin:14px 0"><div class="r"><span><span style="color:${col(id)}">●</span> ${esc(c.emoji)} ${esc(c.name)}</span><span>${dur(v)} · ${Math.round(v/cur.tot*100)}%</span></div><div class="bar"><i style="width:${v/cur.tot*100}%"></i></div><div class="mut">${x>=0?'▲':'▼'} ${dur(Math.abs(x))} vs periode lalu</div></div>`}).join(''):'<p class="mut">Belum ada aktivitas pada periode ini.</p>')+chart},
 set(){const dk=document.documentElement.dataset.theme=='dark',n=T.flatMap(un).length;
-return`<h2>Pengaturan</h2><div class="cd r"><span>Tema</span><button class="bt" onclick="theme()">${dk?'Mode terang':'Mode gelap'}</button></div><div class="cd r"><span>Ingatkan jika timer lebih dari (menit)</span><input type="number" min="1" style="width:84px" value="${+ls('remind')||120}" onchange="ls('remind',this.value)"></div>
-<div class="r" style="margin:20px 0 10px"><h3>Kategori</h3><button class="bt p" onclick="editC()">+ Tambah</button></div>${cats().map(c=>`<div class="cd r" onclick="editC('${c.id}')"><span>${esc(c.emoji)} ${esc(c.name)}</span><span class="mut">${c.kind}</span></div>`).join('')}
-<h3 style="margin:20px 0 10px">Data</h3><div class="cd"><div class="mut">${n} data belum tersinkron ke Supabase</div><div class="r" style="margin-top:10px"><button class="bt" onclick="syncNow()">Sinkron</button><button class="bt" onclick="exp('csv')">CSV</button><button class="bt" onclick="exp('json')">JSON</button></div></div>`}};
+return`<h2>Pengaturan</h2><div class="cd r"><span class="mut">${auth()?esc(auth().em):'Belum masuk'}</span><button class="bt" onclick="${auth()?'logout()':'login()'}">${auth()?'Keluar':'Masuk'}</button></div><div class="cd r"><span>Tema</span><button class="bt" onclick="theme()">${dk?'Mode terang':'Mode gelap'}</button></div><div class="cd r"><span>Ingatkan jika timer lebih dari (menit)</span><input type="number" min="1" style="width:84px" value="${+ls('remind')||120}" onchange="ls('remind',this.value)"></div>
+<div class="r" style="margin:20px 0 10px"><h3>Kategori</h3><button class="bt p" onclick="editC()">+ Tambah</button></div>${cats().map(c=>`<div class="cd r" onclick="editC('${c.id}')"><span>${esc(c.emoji)} ${esc(c.name)}</span><span class="mut">${esc(c.kind)}</span></div>`).join('')}
+<div class="r" style="margin:20px 0 10px"><h3>Motivasi</h3><button class="bt p" onclick="editQ()">+ Tambah</button></div>${S.quotes.filter(q=>!q.deleted).map(q=>`<div class="cd r"><button class="bt" onclick="tfav('${q.id}')">${q.fav?'★':'☆'}</button><span style="flex:1" onclick="editQ('${q.id}')">${esc(q.text.slice(0,90))}</span></div>`).join('')}<h3 style="margin:20px 0 10px">Data</h3><div class="cd"><div class="mut">${n} data belum tersinkron ke Supabase</div><div class="r" style="margin-top:10px"><button class="bt" onclick="syncNow()">Sinkron</button><button class="bt" onclick="exp('csv')">CSV</button><button class="bt" onclick="exp('json')">JSON</button><button class="bt" onclick="$('#imp').click()">Impor</button><input id="imp" type="file" accept=".json" hidden onchange="imp(this.files[0])"></div></div>`}};
 function theme(){const d=document.documentElement;d.dataset.theme=d.dataset.theme=='dark'?'light':'dark';ls('theme',d.dataset.theme);render()}
 function exp(t){const q=v=>'"'+String(v??'').replace(/"/g,'""')+'"',L=S.sessions.filter(s=>!s.deleted&&s.ended_at).sort((a,b)=>a.started_at-b.started_at);
-const x=t=='json'?JSON.stringify({categories:S.categories,routines:S.routines,sessions:S.sessions},null,1):'id,kategori,mulai,selesai,detik,catatan\n'+L.map(s=>[s.id,q(cat(s.cat_id).name),new Date(s.started_at).toISOString(),new Date(s.ended_at).toISOString(),Math.round((s.ended_at-s.started_at)/1e3),q(s.note)].join(',')).join('\n'),
+const x=t=='json'?JSON.stringify(Object.fromEntries(T.map(s=>[s,S[s]])),null,1):'id,kategori,mulai,selesai,detik,catatan\n'+L.map(s=>[s.id,q(cat(s.cat_id).name),new Date(s.started_at).toISOString(),new Date(s.ended_at).toISOString(),Math.round((s.ended_at-s.started_at)/1e3),q(s.note)].join(',')).join('\n'),
 a=document.createElement('a');a.href=URL.createObjectURL(new Blob([x],{type:'text/plain'}));a.download='timelog-'+ymd(new Date())+'.'+t;a.click()}
 function render(){$('#nv').innerHTML=[['timer','⏱','Timer'],['rut','☰','Rutinitas'],['hist','▤','Riwayat'],['stat','◔','Statistik'],['set','⚙','Atur']].map(([k,i,n])=>`<button class="${tab==k?'on':''}" onclick="tab='${k}';render()"><span>${i}</span>${n}</button>`).join('');$('#m').innerHTML=V[tab]();tick();bd()}
 
-/* ---------- Mulai ---------- */
+/* ---------- Checklist ---------- */
+const ap=(r,d)=>!r.deleted&&!r.archived&&d>=(r.since||ymd(new Date(r.updated||Date.now())))&&(!r.days?.length||r.days.includes(new Date(d+'T00:00:00').getDay())),
+lg=()=>new Set(S.routine_logs.filter(l=>l.done&&!l.deleted).map(l=>l.routine_id+'|'+l.day)),
+dst=(d,LG)=>{const A=S.routines.filter(r=>ap(r,d));return{e:A.length,k:A.filter(r=>LG.has(r.id+'|'+d)).length}};
+function streak(LG){let n=0;const t=new Date();for(let i=0;i<400;i++){const{e,k}=dst(ymd(new Date(t.getFullYear(),t.getMonth(),t.getDate()-i)),LG);if(!e)continue;if(k>=e)n++;else if(i)break}return n}
+async function tgl(id){const d=ymd(new Date()),lid=id+'_'+d,l=S.routine_logs.find(x=>x.id==lid),on=!(l&&l.done);await save('routine_logs',{...(l||{id:lid,routine_id:id,day:d}),done:on,done_at:on?Date.now():null,deleted:false});render()}
+function rhist(LG){const[a,b]=range(sm,so),n=new Date(),t=+new Date(n.getFullYear(),n.getMonth(),n.getDate()+1),days=[];
+for(const d=new Date(a);+d<b&&+d<t;d.setDate(d.getDate()+1))days.push(ymd(d));
+const D=days.map(d=>dst(d,LG)),E=D.reduce((s,x)=>s+x.e,0),K=D.reduce((s,x)=>s+x.k,0),
+M=S.routines.filter(r=>!r.deleted).map(r=>{let e=0,k=0;days.forEach(d=>{if(ap(r,d))e++;if(LG.has(r.id+'|'+d))k++});return{r,e,k}}).filter(x=>x.e||x.k).sort((x,y)=>Math.min(1,y.k/(y.e||1))-Math.min(1,x.k/(x.e||1))),
+sg=(m,l)=>`<button class="bt${sm==m?' on':''}" onclick="sm='${m}';so=0;render()">${l}</button>`;
+return`<div class="seg">${sg('d','Hari')}${sg('w','Minggu')}${sg('m','Bulan')}</div><div class="r"><button class="bt" onclick="so--;render()">‹</button><span class="mut">${ymd(new Date(a))+(sm=='d'?'':' s/d '+ymd(new Date(b-1)))}</span><button class="bt" ${so>=0?'disabled':''} onclick="so++;render()">›</button></div><div class="clk" style="font-size:44px;margin:16px 0 4px">${E?Math.round(Math.min(K,E)/E*100):0}%</div><div class="cur">${K} dari ${E} kegiatan selesai</div>`+(sm=='d'?'':`<div class="vb">${D.map(x=>`<i style="height:${x.e?x.k/x.e*100:0}%"></i>`).join('')}</div>`)+
+M.map(({r,e,k})=>`<div style="margin:14px 0"><div class="r"><span>${esc(r.name)}${r.archived?' (arsip)':''}</span><span>${k}/${e||'–'}</span></div><div class="bar"><i style="width:${e?Math.min(100,k/e*100):100}%"></i></div>${e&&k<e?`<div class="mut">Terlewat ${e-k}×</div>`:''}</div>`).join('')}
+
+/* ---------- Motivasi ---------- */
+function pickQ(){const P=S.quotes.filter(q=>!q.deleted&&q.text);if(!P.length)return Q=null;const W=P.flatMap(q=>q.fav?[q,q,q]:[q]),last=Q?.id||ls('lastq');let c;for(let i=0;i<6;i++){c=W[Math.random()*W.length|0];if(c.id!=last||P.length<2)break}Q=c;ls('lastq',c.id)}
+const qcard=()=>{if(!Q||!S.quotes.some(q=>q.id==Q.id&&!q.deleted))pickQ();return`<div class="cd mut" onclick="pickQ();render()" style="text-align:center;font-size:14px">${Q?esc(Q.text)+(Q.src?'<br><i>— '+esc(Q.src)+'</i>':''):'Tambahkan kata motivasi di Pengaturan'}</div>`};
+function editQ(id){const q=S.quotes.find(x=>x.id==id)||{id:uid(),text:'',src:'',fav:false};
+form(id?'Edit motivasi':'Motivasi baru',[{k:'text',l:'Kata-kata (nasihat, ayat, kutipan, pengingat)',t:'area',v:q.text},{k:'src',l:'Sumber (opsional)',v:q.src}],
+f=>f.text.trim()?save('quotes',{...q,text:f.text.trim(),src:f.src.trim(),deleted:false}).then(render):toast('Teks tidak boleh kosong'),
+id&&(()=>confirm('Hapus motivasi ini?')&&save('quotes',{...q,deleted:true}).then(render)))}
+async function tfav(id){const q=S.quotes.find(x=>x.id==id);await save('quotes',{...q,fav:!q.fav});render()}
+
+/* ---------- Impor ---------- */
+async function imp(f){if(!f)return;try{const j=JSON.parse(await f.text());let n=0;for(const s of T)for(const w of j[s]||[]){if(!ok_(w))continue;const l=S[s].find(x=>x.id==w.id);if(!l||(w.updated||0)>l.updated){await save(s,{...w});n++}}toast(n+' data dipulihkan');render()}catch(e){toast('File JSON tidak valid')}}
+
 (async()=>{const th=ls('theme');if(th)document.documentElement.dataset.theme=th;
 await open();for(const s of T)S[s]=await tx(s,'readonly',o=>o.getAll());
-if(!S.categories.length&&navigator.onLine)await pull();
+if(!S.categories.length&&auth()&&navigator.onLine){const h=await hdr().catch(()=>0);h&&await pull(h)}
 if(!S.categories.length)for(const[n,e,k]of DEF)await save('categories',{id:'c-'+n.toLowerCase().replace(/\W/g,''),name:n,emoji:e,kind:k,deleted:false});
-render();pull().then(()=>{render();sync()});
+navigator.storage?.persist?.();render();sync().then(render);
 setInterval(tick,500);setInterval(sync,30000);addEventListener('online',sync);addEventListener('offline',bd);
 document.addEventListener('visibilitychange',()=>{if(!document.hidden){tick();sync()}});
 if('serviceWorker'in navigator)navigator.serviceWorker.register('sw.js').catch(()=>{})})();
